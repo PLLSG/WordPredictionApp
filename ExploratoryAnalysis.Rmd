@@ -1,0 +1,143 @@
+---
+title: "Word Prediction Data Exploratory Analysis"
+author: "David M. Leonard"
+date: "October 20, 2017"
+output: html_document
+---
+<style type="text/css">
+
+body{ /* Normal  */
+   font-size: 18px;
+}
+</style>
+---
+<style>
+  .myTable table, td, th {
+    padding: 0px 5px 0px 5px;
+    border: 1px dotted;
+    font-size: 15px;
+  }
+  table {
+    margin-left:10%; 
+    margin-right:10%;
+    margin-top:5%;
+    margin-bottom:5%;
+    }
+  tr:nth-child(even) {background-color: #f2f2f2}
+</style>
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(knitr)
+library(dplyr)
+library(ggplot2)
+```
+
+## Overview
+
+The Coursera Data Science Capstone project involves building a word prediction model that would be useful to users of virtual keyboards on smartphones or tablets. A number of files that can be used to produce such a model were provided, containing examples of twitter messages (tweets), blog entries, and news stories, in a number of different languages.   
+
+For the purposes of this project, we will focus on the three English-language files provided.
+
+## Sample Corpora
+
+The table below summarizes the three files. 
+
+```{r echo=FALSE}
+
+setwd("C:/Users/Dave/Documents/Data Science/Coursera/Data Science Specialization Capstone Project/Coursera-SwiftKey")
+
+twitterWordFreq <- read.table("TwitterWordFreq")
+hashtags <- twitterWordFreq %>%
+    filter(substr(ngram,1,1)=="#")
+hashtagCount <- nrow(hashtags)
+
+# blogWordFreq <- read.table("BlogWordFreq")
+# newsWordFreq <- read.table("NewsWordFreq")
+totalWordFreq <- read.table("TotalWordFreq")
+
+fileSummary <- read.table("FileSummary")
+fileSummary$WordsPerSentence <- round(fileSummary$WordsPerSentence,1)
+fileSummary$SizeMB <- round(fileSummary$SizeMB,0)
+
+totRow <- nrow(fileSummary)
+SingleOccurrenceWordPct <- fileSummary[totRow,]$SingleOccurrenceWords/fileSummary[totRow,]$UniqueWords
+
+kable(fileSummary, 
+      table.attr='class="myTable"',
+      col.names = c("File Name",
+                    "Size (MB)",
+                    "Lines",
+                    "Sentences",
+                    "Words",
+                    "Unique Words",
+                    "Words 90th Percentile",
+                    "Single Occurrence Words",
+                    "Words per Sentence"),
+      #align = c("l","c","c","c","c","c","C","c","c"), 
+      format.args = list(big.mark = ","),
+      format = "pandoc",
+      row.names = "F")
+
+```
+
+The twitter file has the largest number of lines and sentences, but the blog file has the largest number of words. Tweets have the greatest number of unique words, but many of those are contrived letter strings rather than English-language words. For example, there are `r formatC(hashtagCount,big.mark=",")` unique hashtags represented, with values such as #neversaynever, #oscars, and #obama. Both blog posts and news articles have more than twice as many words per sentence as tweets.
+
+An important statistic is the fact that of the `r formatC(fileSummary[totRow,]$UniqueWords, big.mark=",")` unique words in the combined corpora, `r formatC(fileSummary[totRow,]$SingleOccurrenceWords, big.mark=",")` or `r round(SingleOccurrenceWordPct*100,0)`% occur only once.
+
+## Distribution of Words  
+The chart below plots the cumulative percentage of unique words against cumulative percentage of total words across all three corpora. Less than 1% of the unique words account for 90% of all word occurrences. Any prediction model is therefore likely to only make use of a small fraction of the available words.
+```{r echo=FALSE, fig.width=11}
+totalUniqueWords <- nrow(totalWordFreq)
+totalWordFreq10 <- totalWordFreq %>% filter(row_number(n)/totalUniqueWords <= 0.10)
+
+ggplot(totalWordFreq10,aes(row_number(n)/totalUniqueWords,cumpct)) + 
+    xlab("Cumulative % of Unique Words") +
+    ylab("Cumulative % of Total Words in Corpora") +
+    geom_line()
+```
+
+The chart below shows the frequency of occurrence for the top 50 unique words in the combined corpus.
+
+```{r echo=FALSE, fig.width=11}
+topWords <- totalWordFreq[1:50,]
+topWords$ngram <- factor(topWords$ngram, levels = topWords$ngram)
+ggplot(topWords,aes(ngram,Freq)) +
+    xlab("Word") +
+    ylab("Frequency") +
+    geom_col() +
+    theme(axis.text.x = element_text(angle = 90))
+```
+
+## Prediction Model Strategy  
+The goal of the project is to develop a tool that suggests possible next words when someone is typing on a smartphone or tablet virtual keyboard. Note that such tools typically offer mutliple alternatives, usually four or even five possible words. The basic strategy will be to treat typed words as a [Markov Chain](https://en.wikipedia.org/wiki/Markov_chain), which means that predictions about future words can be made based only on the most recently-typed words. The most recently-typed words are referred to as an "*n*-gram", where *n* refers to an arbitrary number of words in sequence. For example, a 1-gram is the most recently typed word, a bi-gram is the two most recently typed words, a tri-gram is three words, etc. The approach we will use to make our predictions is called [Katz's Backoff Model](https://en.wikipedia.org/wiki/Katz%27s_back-off_model), which can be described as follows:
+
+1. Create a table that has all n-grams observed in the corpora, where *n* is between 1 and *__x__* (a number to be determined as part of the model development process). For each such *n*-gram, there will be an entry for each potential next word, and a probability of that next word occurring. The table should be in descending order of *n*-gram probability within n-gram.
+2. Establish the number of words that will be offered as alternative predictions. Call that number *predcount*.
+3. To predict the next word, begin by looking up the *n*-gram representing the most recent *__x__* words in the lookup table, and add the first *predcount* words included there to the list of alternatives.
+4. If the count of alternative next words is less than *predcount*, continue by subracting 1 from the *n*-gram size, and repeating the process in step 3.
+5. If there are still less than *predcount* alternatives after exhausting all *n*-grams, add as many words from a table of the most frequently occurring words in the corpora to the list as is needed to have a full list of alternative next words.  
+
+## The Shiny App
+The word prediction app will present a text box into which the user can type. Below the text box will be a horizontal list of possible next words; the user can click on any one of them and it will be added as the next word in the text box. There will be a separate small window that can be minimized which holds the running total accuracy score (how often did the user choose a predicted word for inclusion in their message vs. number of words typed) as well as a reset button to restart the accuracy measurement. Words in the text box that were chosen from the prediction list will be shown in a different font or color to enable visualization of the prediction effectiveness.
+
+## Implementation Considerations
+There are a number of aspects of the model that we will evaluate during development:  
+
+* Sentence Breaks: It probably doesn't make sense to include any n-grams in the lookup table that span sentence boundaries. So we will generate n-grams sentence-by-sentence. Furthermore, the predictor tool will recognize the end of one sentence and the beginning of the next, and make it's prediction for the first word of each sentence based on a separate "first word frequency" lookup table.  
+* Should we build a single model for all situations, or three different models, one for each of the three corpora? It may be that the most likely next word in a tweet is very different than that of a blog entry or a news post.  
+* We will look at ways to minimize the size of the lookup table in order to avoid memory limits and slow initialization.  
+* Maximum *n*-gram size: we will evaluate the prediction accuracy of models with different maximum values for *n*, and choose the value that optimizes performance and prediction accuracy  
+* In order to evaluate implementation alternatives, we will need to develop a function that can be used to measure the prediction accuracy of the model against a sample corpora. That function will walk through the sample one word at a time, predicting the next word and then determining if the actual next word matches one of the offered suggestions. If it does, the number of successful matches is incremented by one. The accuracy measurement will be the number of successful matches divided by the total words predicted.  
+
+## Expected Accuracy  
+Prediction accuracy is likely to be quite low. Even with the 90th percentile of all word occurrences being limited to 7,291 unique words, the probability that a handful of choices will match a given next word seems relatively low. A key part of the implementation process will be to evaluate accuracy and look for ways to improve it.  
+
+## Performance
+We assume for this project that the process of building the lookup table used by the model is an offline process and does not need to be done dynamically (although it should be possible to extend the model to start with an *a priori* lookup table, and then dynamically modify it based on the typing habits of an individual user.) The prediction tool will use that table to do the lookups "on the fly". A key consideration will be making sure that the lookup table can be searched and options presented to the user in real time (i.e., it must have response time on the order of tens of milliseconds). 
+
+## Profanity
+One goal of our next word predictor is to avoid suggesting profane words. We will filter out any *n*-grams that contain words which occur in a [list that was released by Google in 2013](https://www.freewebheaders.com/full-list-of-bad-words-banned-by-google/), prior to building our lookup table.
+
+
